@@ -475,7 +475,9 @@ defmodule ExCmd.ProcessTest do
     # we test backpressure by testing if `write` is delayed when we delay read
     {:ok, s} = Process.start_link(~w(cat))
 
-    large_bin = generate_binary(65_535 * 5)
+    # Exceed both OS pipe buffers, including Linux's 1 MiB auto-growth, so
+    # completion really requires reads rather than merely fitting in buffers.
+    large_bin = generate_binary(65_535 * 100)
 
     writer =
       Task.async(fn ->
