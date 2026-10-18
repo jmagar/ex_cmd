@@ -101,6 +101,35 @@ defmodule ExCmd.StreamCauseTest do
     assert {:halted, ["d", "c", "b", "a"]} = resume.({:cont, ["d", "c", "b", "a"]})
   end
 
+  test "halting a suspended stream reaps the owned command" do
+    reducer = fn chunk, acc ->
+      track_child()
+      {:suspend, [chunk | acc]}
+    end
+
+    assert {:suspended, ["ready"], resume} = Enumerable.reduce(command(), {:cont, []}, reducer)
+    assert_raise ExCmd.Stream.AbnormalExit, ~r/epipe/, fn -> resume.({:halt, []}) end
+    assert_reaped()
+  end
+
+  test "a read failure after suspension preserves its cause and reaps the command" do
+    reducer = fn chunk, acc ->
+      track_child()
+      {:suspend, [chunk | acc]}
+    end
+
+    assert {:suspended, ["ready"], resume} = Enumerable.reduce(command(), {:cont, []}, reducer)
+    assert_received {:owned_child, child, _, _} = owned
+    send(self(), owned)
+    assert :ok = ExCmd.Process.close_stdout(%ExCmd.Process{pid: child})
+
+    assert_raise ExCmd.Process.Error, ~r/pipe_closed_or_invalid_caller/, fn ->
+      resume.({:cont, []})
+    end
+
+    assert_reaped()
+  end
+
   test "initial halt and suspend retain the existing resource contract" do
     stream = ExCmd.stream!(["printf", "ready"], ignore_epipe: true)
 
