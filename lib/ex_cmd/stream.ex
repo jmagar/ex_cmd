@@ -106,12 +106,62 @@ defmodule ExCmd.Stream do
       ]
     end
 
-    def reduce(arg, acc, fun) do
-      start_fun = fn -> start_process(arg) end
-      next_fun = &read_next/1
-      after_fun = &cleanup/1
+    def reduce(stream, tagged_acc, fun) do
+      reduce_state(start_process(stream), tagged_acc, fun)
+    end
 
-      Stream.resource(start_fun, next_fun, after_fun).(acc, fun)
+    defp reduce_state(state, {:halt, acc}, _fun) do
+      cleanup(state)
+      {:halted, acc}
+    end
+
+    defp reduce_state(state, {:suspend, acc}, fun) do
+      {:suspended, acc, &reduce_state(state, &1, fun)}
+    end
+
+    defp reduce_state(state, {:cont, acc}, fun) do
+      case preserving_failure(state, fn -> read_next(state) end) do
+        {:halt, final_state} ->
+          cleanup(final_state)
+          {:halted, acc}
+
+        {items, next_state} ->
+          reduce_items(items, next_state, {:cont, acc}, fun)
+      end
+    end
+
+    defp reduce_items([], state, tagged_acc, fun), do: reduce_state(state, tagged_acc, fun)
+
+    defp reduce_items([item | rest], state, {:cont, acc}, fun) do
+      next_acc = preserving_failure(state, fn -> fun.(item, acc) end)
+      reduce_items(rest, state, next_acc, fun)
+    end
+
+    defp reduce_items(_items, state, {:halt, _acc} = tagged_acc, fun),
+      do: reduce_state(state, tagged_acc, fun)
+
+    defp reduce_items(items, state, {:suspend, acc}, fun) do
+      {:suspended, acc, &reduce_items(items, state, &1, fun)}
+    end
+
+    # Stream.resource's after callback raises over an in-flight read/consumer
+    # failure. Keep cleanup mandatory, but never replace that original failure
+    # with the command's secondary exit status.
+    defp preserving_failure(state, step) do
+      try do
+        step.()
+      catch
+        kind, reason ->
+          stacktrace = __STACKTRACE__
+
+          try do
+            cleanup(state)
+          catch
+            _, _ -> :ok
+          end
+
+          :erlang.raise(kind, reason, stacktrace)
+      end
     end
 
     defp read_next(%State{process_status: :running} = state) do
