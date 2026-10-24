@@ -555,6 +555,18 @@ defmodule ExCmd.Process do
   ## Server
 
   @impl true
+  def format_status(status) do
+    # Omit status fields containing launch options or queued input.
+    # OTP appends exception stack frames independently of this callback.
+    Map.merge(status, %{
+      state: :redacted,
+      message: :redacted,
+      reason: :redacted,
+      log: []
+    })
+  end
+
+  @impl true
   def init(args) do
     {owner, args} = Map.pop!(args, :owner)
     {exit_ref, args} = Map.pop!(args, :exit_ref)

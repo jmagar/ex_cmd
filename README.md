@@ -138,6 +138,19 @@ ExCmd.stream!(["sh", "-c", "echo foo; echo bar >&2"],
 # => "foo\nbar\n"
 ```
 
+## Launcher diagnostics
+
+Launcher state inspection omits execution arguments and pending I/O. On OTP 25
+and later, the status callback also removes state, message, reason and debug-log
+values from GenServer status reports. Optional native-helper logging records
+argument and environment counts rather than values. Validation errors report
+invalid option names without their values.
+
+This does not scrub child output, explicit process-state access, or arbitrary
+payloads included in exception stack frames by OTP. Applications must continue
+to treat command output and process inspection as private data. Older OTP status
+reporting has not been qualified by this change.
+
 ## Alternatives
 
 - For NIF-based solutions without middleware overhead, consider [Exile](https://github.com/akash-akya/exile)
