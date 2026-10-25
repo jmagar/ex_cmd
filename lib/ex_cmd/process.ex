@@ -554,8 +554,15 @@ defmodule ExCmd.Process do
 
   ## Server
 
-  @impl true
-  def format_status(status) do
+  # OTP 25 supports this callback before older Elixir behavior metadata lists it.
+  # Annotate only when declared, avoiding warnings on both older and newer Elixir.
+  if {:format_status, 1} in GenServer.behaviour_info(:callbacks) do
+    @impl true
+  end
+
+  def format_status(status), do: protect_callback(fn -> dispatch_format_status(status) end)
+
+  defp dispatch_format_status(status) do
     # Omit status fields containing launch options or queued input.
     # OTP appends exception stack frames independently of this callback.
     Map.merge(status, %{
@@ -567,7 +574,50 @@ defmodule ExCmd.Process do
   end
 
   @impl true
-  def init(args) do
+  def init(args), do: protect_callback(fn -> dispatch_init(args) end)
+
+  @impl true
+  def handle_continue(continuation, state),
+    do: protect_callback(fn -> dispatch_handle_continue(continuation, state) end)
+
+  @impl true
+  def handle_cast(message, state),
+    do: protect_callback(fn -> dispatch_handle_cast(message, state) end)
+
+  @impl true
+  def handle_call(message, from, state),
+    do: protect_callback(fn -> dispatch_handle_call(message, from, state) end)
+
+  @impl true
+  def handle_info(message, state),
+    do: protect_callback(fn -> dispatch_handle_info(message, state) end)
+
+  # Runtime crash reporting can use the original exception stack independently
+  # of format_status. Sanitize unexpected callback failures before OTP receives
+  # them, retaining call sites and arities without input or state arguments.
+  defp protect_callback(callback) do
+    callback.()
+  catch
+    kind, _reason ->
+      stack = Enum.map(__STACKTRACE__, &diagnostic_frame/1)
+      :erlang.raise(kind, :callback_failed, stack)
+  end
+
+  defp diagnostic_frame({module, function, arguments, location}) when is_list(location),
+    do:
+      {module, function, diagnostic_arity(arguments),
+       Keyword.take(location, [:file, :line, :column])}
+
+  defp diagnostic_frame({module, function, arguments}),
+    do: {module, function, diagnostic_arity(arguments)}
+
+  defp diagnostic_frame(_frame), do: {:erlang, :error, 0, []}
+
+  defp diagnostic_arity(arguments) when is_list(arguments), do: length(arguments)
+  defp diagnostic_arity(arity) when is_integer(arity) and arity >= 0, do: arity
+  defp diagnostic_arity(_arguments), do: 0
+
+  defp dispatch_init(args) do
     {owner, args} = Map.pop!(args, :owner)
     {exit_ref, args} = Map.pop!(args, :exit_ref)
 
@@ -583,13 +633,11 @@ defmodule ExCmd.Process do
     {:ok, state, {:continue, nil}}
   end
 
-  @impl true
-  def handle_continue(nil, state) do
+  defp dispatch_handle_continue(nil, state) do
     {:noreply, exec(state)}
   end
 
-  @impl true
-  def handle_cast({:prepare_exit, caller, timeout}, state) do
+  defp dispatch_handle_cast({:prepare_exit, caller, timeout}, state) do
     Log.debug("prepare_exit: #{timeout}")
     state = close_pipes(state, caller)
 
@@ -602,13 +650,12 @@ defmodule ExCmd.Process do
           {:noreply, state}
         else
           {exit_timeout, kill_timeout} = divide_timeout(timeout)
-          handle_info({:exit_sequence, :normal_exit, exit_timeout, kill_timeout}, state)
+          dispatch_handle_info({:exit_sequence, :normal_exit, exit_timeout, kill_timeout}, state)
         end
     end
   end
 
-  @impl true
-  def handle_call({:change_pipe_owner, pipe_name, new_owner}, _from, state) do
+  defp dispatch_handle_call({:change_pipe_owner, pipe_name, new_owner}, _from, state) do
     with {:ok, pipe} <- State.pipe(state, pipe_name),
          {:ok, new_pipe} <- Pipe.set_owner(pipe, new_owner),
          {:ok, state} <- State.put_pipe(state, pipe_name, new_pipe) do
@@ -619,7 +666,7 @@ defmodule ExCmd.Process do
     end
   end
 
-  def handle_call({:close_pipe, pipe_name}, {caller, _} = from, state) do
+  defp dispatch_handle_call({:close_pipe, pipe_name}, {caller, _} = from, state) do
     with {:ok, pipe} <- State.pipe(state, pipe_name),
          {:ok, new_pipe} <- Pipe.close(pipe, caller),
          :ok <- GenServer.reply(from, :ok),
@@ -631,7 +678,7 @@ defmodule ExCmd.Process do
     end
   end
 
-  def handle_call({:read_stdout, size}, from, state) do
+  defp dispatch_handle_call({:read_stdout, size}, from, state) do
     case Operations.read(state, {:read_stdout, from, size}) do
       {:noreply, state} ->
         {:noreply, state}
@@ -641,7 +688,7 @@ defmodule ExCmd.Process do
     end
   end
 
-  def handle_call({:write_stdin, binary}, from, state) do
+  defp dispatch_handle_call({:write_stdin, binary}, from, state) do
     case State.pop_operation(state, :write_stdin) do
       _ when state.status != :running ->
         {:reply, {:error, :epipe}, state}
@@ -667,16 +714,14 @@ defmodule ExCmd.Process do
     end
   end
 
-  @impl true
-  def handle_call(:os_pid, _from, state) do
+  defp dispatch_handle_call(:os_pid, _from, state) do
     {:reply, {:ok, state.os_pid}, state}
   end
 
-  @impl true
-  def handle_info(
-        {:exit_sequence, current_stage, timeout, kill_timeout},
-        %{status: status} = state
-      ) do
+  defp dispatch_handle_info(
+         {:exit_sequence, current_stage, timeout, kill_timeout},
+         %{status: status} = state
+       ) do
     Log.debug("exit_sequence, #{current_stage} #{timeout} #{kill_timeout}, #{inspect(state)}")
 
     cond do
@@ -703,13 +748,12 @@ defmodule ExCmd.Process do
     end
   end
 
-  @impl true
-  def handle_info({port, {:data, data}}, %{port: port} = state) do
+  defp dispatch_handle_info({port, {:data, data}}, %{port: port} = state) do
     {tag, bin} = Proto.parse_command(data)
     handle_command(tag, bin, state)
   end
 
-  def handle_info({port, {:exit_status, odu_exit_status}}, %{port: port} = state) do
+  defp dispatch_handle_info({port, {:exit_status, odu_exit_status}}, %{port: port} = state) do
     Log.debug("port exit with status #{odu_exit_status} state: #{inspect(state)}")
 
     state =
@@ -732,7 +776,8 @@ defmodule ExCmd.Process do
   end
 
   # we are only interested in Port exit signals
-  def handle_info({:EXIT, port, reason}, %State{port: port} = state) when reason != :normal do
+  defp dispatch_handle_info({:EXIT, port, reason}, %State{port: port} = state)
+       when reason != :normal do
     Log.debug("port exit with error state: #{inspect(state)}")
 
     state =
@@ -743,7 +788,7 @@ defmodule ExCmd.Process do
     maybe_shutdown(state)
   end
 
-  def handle_info({:EXIT, port, :normal}, %State{port: port} = state) do
+  defp dispatch_handle_info({:EXIT, port, :normal}, %State{port: port} = state) do
     Log.debug("port exit normally state: #{inspect(state)}")
     maybe_shutdown(state)
   end
@@ -751,15 +796,15 @@ defmodule ExCmd.Process do
   # shutdown unconditionally when process owner exit normally.
   # Since ExCmd process is linked to the owner, in case of owner crash,
   # ex_cmd process will be killed by the VM.
-  def handle_info(
-        {:DOWN, owner_ref, :process, _pid, reason},
-        %State{monitor_ref: owner_ref} = state
-      ) do
+  defp dispatch_handle_info(
+         {:DOWN, owner_ref, :process, _pid, reason},
+         %State{monitor_ref: owner_ref} = state
+       ) do
     Log.debug("process owner exit: state: #{inspect(state)}")
     {:stop, reason, state}
   end
 
-  def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
+  defp dispatch_handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
     Log.debug("pipe owner exit: state: #{inspect(state)}")
     state = close_pipes(state, pid)
     maybe_shutdown(state)
