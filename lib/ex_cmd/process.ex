@@ -554,8 +554,12 @@ defmodule ExCmd.Process do
 
   ## Server
 
-  # OTP 25 supports format_status/1 even when older Elixir GenServer behavior
-  # metadata does not yet declare this callback.
+  # OTP 25 supports this callback before older Elixir behavior metadata lists it.
+  # Annotate only when declared, avoiding warnings on both older and newer Elixir.
+  if {:format_status, 1} in GenServer.behaviour_info(:callbacks) do
+    @impl true
+  end
+
   def format_status(status), do: protect_callback(fn -> dispatch_format_status(status) end)
 
   defp dispatch_format_status(status) do
