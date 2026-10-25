@@ -146,10 +146,14 @@ values from GenServer status reports. Optional native-helper logging records
 argument and environment counts rather than values. Validation errors report
 invalid option names without their values.
 
-This does not scrub child output, explicit process-state access, or arbitrary
-payloads included in exception stack frames by OTP. Applications must continue
-to treat command output and process inspection as private data. Older OTP status
-reporting has not been qualified by this change.
+Unexpected callback failures use a fixed diagnostic reason. Their stack frames
+retain module, function, arity and source location, excluding argument values
+and additional error metadata. Ordinary results and explicit stop returns keep
+their existing behavior.
+
+This does not scrub child output or explicit process-state access. Applications
+must continue to treat command output and process inspection as private data.
+Older OTP status reporting has not been qualified by this change.
 
 ## Alternatives
 
