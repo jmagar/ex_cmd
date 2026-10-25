@@ -148,20 +148,18 @@ defmodule ExCmd.Stream do
     # failure. Keep cleanup mandatory, but never replace that original failure
     # with the command's secondary exit status.
     defp preserving_failure(state, step) do
-      try do
-        step.()
-      catch
-        kind, reason ->
-          stacktrace = __STACKTRACE__
+      step.()
+    catch
+      kind, reason ->
+        stacktrace = __STACKTRACE__
 
-          try do
-            cleanup(state)
-          catch
-            _, _ -> :ok
-          end
+        try do
+          cleanup(state)
+        catch
+          _, _ -> :ok
+        end
 
-          :erlang.raise(kind, reason, stacktrace)
-      end
+        :erlang.raise(kind, reason, stacktrace)
     end
 
     defp read_next(%State{process_status: :running} = state) do
