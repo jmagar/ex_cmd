@@ -235,6 +235,7 @@ defmodule ExCmd.Stream do
     defp start_input_streamer(%Sink{process: process} = sink, input) do
       case input do
         :no_input ->
+          :ok = Process.close_stdin(process)
           Task.async(fn -> :no_input end)
 
         {:enumerable, enum} ->
