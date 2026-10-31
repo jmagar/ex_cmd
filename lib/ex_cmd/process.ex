@@ -856,6 +856,8 @@ defmodule ExCmd.Process do
   end
 
   defp handle_command(:exit_status, exit_status, state) do
+    :ok = Proto.close_port(state.port)
+
     state =
       state
       |> cancel_pending_actions()

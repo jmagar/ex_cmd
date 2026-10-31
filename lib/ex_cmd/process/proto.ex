@@ -109,6 +109,16 @@ defmodule ExCmd.Process.Proto do
     send_command(kill(), <<>>, port)
   end
 
+  # odu keeps running after it reports the exit status, until the port is closed
+  @spec close_port(port) :: :ok
+  def close_port(port) do
+    Port.close(port)
+    :ok
+  rescue
+    # the port might have already been closed
+    ArgumentError -> :ok
+  end
+
   def start(cmd_with_args, env, odu_opts) do
     port = start_odu_port(odu_path(), cmd_with_args, odu_opts)
     send_env(env, port)

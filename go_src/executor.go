@@ -44,6 +44,7 @@ func execute(workdir string, args []string, stderrConfig string) error {
 	writerDone := make(chan struct{})
 	// must be buffered so that function can close without blocking
 	stdinClose := make(chan struct{}, 1)
+	cmdExited := make(chan struct{})
 	kill := make(chan bool, 1)
 	sigs := make(chan os.Signal)
 
@@ -59,8 +60,14 @@ func execute(workdir string, args []string, stderrConfig string) error {
 	proc.Dir = workdir
 	proc.Env = append(os.Environ(), readEnvFromStdin()...)
 
-	runPipeline(proc, writerDone, stdinClose, kill, stderrConfig)
+	runPipeline(proc, writerDone, stdinClose, cmdExited, kill, stderrConfig)
 	err := waitPipelineTermination(proc, sigs, stdinClose, writerDone, kill)
+
+	// Exiting closes our end of stdin. A write to it then fails with EPIPE,
+	// which kills the port and discards whatever it has not read yet,
+	// including the exit status written below. So leave only after the port
+	// is closed.
+	defer waitPortClose(sigs, stdinClose, cmdExited)
 
 	if err == nil {
 		writeCmdExitCode(0)
@@ -77,7 +84,24 @@ func execute(workdir string, args []string, stderrConfig string) error {
 	}
 }
 
-func runPipeline(proc *exec.Cmd, writerDone chan struct{}, stdinClose chan struct{}, kill chan<- bool, stderrConfig string) {
+func waitPortClose(sigs <-chan os.Signal, stdinClose <-chan struct{}, cmdExited chan<- struct{}) {
+	close(cmdExited)
+
+	for {
+		select {
+		case <-stdinClose:
+			return
+		case sig := <-sigs:
+			// a late write to the stdin of the exited command raises SIGPIPE
+			if sig != syscall.SIGPIPE {
+				logger.Printf("Received OS Signal: %v\n", sig)
+				return
+			}
+		}
+	}
+}
+
+func runPipeline(proc *exec.Cmd, writerDone chan struct{}, stdinClose chan struct{}, cmdExited <-chan struct{}, kill chan<- bool, stderrConfig string) {
 	cmdInput := make(chan []byte, 1)
 	cmdOutputDemand := make(chan Packet)
 	cmdInputDemand := make(chan Packet)
@@ -85,11 +109,11 @@ func runPipeline(proc *exec.Cmd, writerDone chan struct{}, stdinClose chan struc
 	cmdOutput := startCommandPipeline(proc, cmdInput, cmdInputDemand, cmdOutputDemand, stderrConfig)
 
 	// go handleSignals(input, outputDemand, done)
-	go stdinReader(cmdInput, cmdOutputDemand, writerDone, stdinClose, kill)
+	go stdinReader(cmdInput, cmdOutputDemand, writerDone, stdinClose, cmdExited, kill)
 	go stdoutWriter(proc.Process.Pid, cmdOutput, cmdInputDemand, writerDone)
 }
 
-func stdinReader(cmdInput chan<- []byte, cmdOutputDemand chan<- Packet, writerDone <-chan struct{}, stdinClose chan<- struct{}, kill chan<- bool) {
+func stdinReader(cmdInput chan<- []byte, cmdOutputDemand chan<- Packet, writerDone <-chan struct{}, stdinClose chan<- struct{}, cmdExited <-chan struct{}, kill chan<- bool) {
 	// closeChan := closeInputHandler(input)
 	cmdInputClosed := false
 	killCommand := false
@@ -99,6 +123,11 @@ func stdinReader(cmdInput chan<- []byte, cmdOutputDemand chan<- Packet, writerDo
 			close(cmdInput)
 		}
 		close(cmdOutputDemand)
+
+		// stdin stays open until the port is closed, and nothing else
+		// notices that close
+		io.Copy(io.Discard, os.Stdin)
+		close(stdinClose)
 	}()
 
 	for {
@@ -110,7 +139,6 @@ func stdinReader(cmdInput chan<- []byte, cmdOutputDemand chan<- Packet, writerDo
 
 		packet, readErr := readPacketFromStdin()
 		if readErr == io.EOF {
-			close(stdinClose)
 			return
 		} else if readErr != nil {
 			fatal(readErr)
@@ -131,17 +159,20 @@ func stdinReader(cmdInput chan<- []byte, cmdOutputDemand chan<- Packet, writerDo
 				logger.Printf("close on closed command input")
 			}
 
-		case SendOutput:
-			cmdOutputDemand <- packet
-
-		case CloseOutput:
-			cmdOutputDemand <- packet
+		case SendOutput, CloseOutput:
+			select {
+			case cmdOutputDemand <- packet:
+			case <-cmdExited:
+			}
 
 		case Input:
 			if cmdInputClosed {
 				fatal("trying to send input on closed command input stream")
 			}
-			cmdInput <- packet.data
+			select {
+			case cmdInput <- packet.data:
+			case <-cmdExited:
+			}
 		}
 	}
 }
